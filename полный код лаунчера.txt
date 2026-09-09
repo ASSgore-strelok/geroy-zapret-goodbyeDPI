@@ -1,0 +1,650 @@
+"""
+GEROY - Обход замедлений YouTube
+Версия: 8.8 (полная)
+"""
+
+import tkinter as tk
+from tkinter import messagebox, ttk, filedialog
+import subprocess
+import os
+import sys
+import json
+from datetime import datetime
+import ctypes
+import time
+import traceback
+import shutil
+import threading
+
+# =============================================
+# ПРОВЕРКА ПРАВ АДМИНИСТРАТОРА
+# =============================================
+def is_admin():
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin()
+    except:
+        return False
+
+if not is_admin():
+    result = messagebox.askyesno(
+        "Права администратора",
+        "🛡️ Для работы программы требуются права администратора!\n\n"
+        "Запустить с правами администратора?"
+    )
+    if result:
+        ctypes.windll.shell32.ShellExecuteW(
+            None, "runas", sys.executable, " ".join(sys.argv), None, 1
+        )
+        sys.exit()
+    else:
+        messagebox.showwarning(
+            "Предупреждение",
+            "Программа запущена без прав администратора.\n"
+            "Некоторые функции могут не работать."
+        )
+
+# =============================================
+# НАСТРОЙКИ
+# =============================================
+APP_NAME = "Герой 🦸"
+APP_VERSION = "8.8"
+CONFIG_FILE = "config.json"
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+GOODBYE_EXE = ""
+WINDIVERT_DLL = ""
+WINDIVERT_SYS = ""
+BLACKLIST_FILE = ""
+ZAPRET_EXE = ""
+CYGWIN_DLL = ""
+
+current_engine = "GoodbyeDPI"
+current_arch = "64"
+DNS_SERVER = "8.8.8.8"
+SELECTED_CONFIG = "Стандартная"  # <- ВОТ ЭТО БЫЛО ВЫРЕЗАНО!
+
+DNS_OPTIONS = {
+    "Google": "8.8.8.8",
+    "Cloudflare": "1.1.1.1",
+    "Яндекс": "77.88.8.8",
+    "Quad9": "9.9.9.9"
+}
+
+BIN_FILES = []
+BAT_FILES = []
+
+# =============================================
+# МОНИТОРИНГ ПРОЦЕССОВ
+# =============================================
+def is_process_running(name):
+    try:
+        result = subprocess.run(
+            f'tasklist /FI "IMAGENAME eq {name}" /NH',
+            shell=True,
+            capture_output=True,
+            text=True
+        )
+        return name.lower() in result.stdout.lower()
+    except:
+        return False
+
+def monitor_loop():
+    global process_status
+    while True:
+        try:
+            running = is_process_running("winws.exe") or is_process_running("goodbyedpi.exe")
+            if running and process_status != "RUNNING":
+                process_status = "RUNNING"
+                root.after(0, update_ui_status, True)
+            elif not running and process_status != "STOPPED":
+                process_status = "STOPPED"
+                root.after(0, update_ui_status, False)
+            time.sleep(2)
+        except:
+            time.sleep(5)
+
+process_status = "STOPPED"
+
+def update_ui_status(running):
+    if running:
+        status_label.config(text="🦸 АКТИВЕН", fg="#00c853")
+        start_btn.config(state=tk.DISABLED)
+        stop_btn.config(state=tk.NORMAL)
+    else:
+        status_label.config(text="🦸 ОТДЫХАЕТ", fg="#ff1744")
+        start_btn.config(state=tk.NORMAL)
+        stop_btn.config(state=tk.DISABLED)
+
+# =============================================
+# ОСТАЛЬНЫЕ ФУНКЦИИ
+# =============================================
+def log_message(msg):
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    log_text.insert(tk.END, f"[{timestamp}] {msg}\n")
+    log_text.see(tk.END)
+    root.update_idletasks()
+
+def find_file(folder, filename):
+    if not os.path.exists(folder):
+        return None
+    for root, dirs, files in os.walk(folder):
+        if filename in files:
+            return os.path.join(root, filename)
+    return None
+
+def find_files(folder, ext):
+    found = []
+    if not os.path.exists(folder):
+        return found
+    for root, dirs, files in os.walk(folder):
+        for f in files:
+            if f.endswith(ext):
+                found.append(os.path.join(root, f))
+    return found
+
+def auto_scan():
+    global GOODBYE_EXE, WINDIVERT_DLL, WINDIVERT_SYS, BLACKLIST_FILE
+    global ZAPRET_EXE, CYGWIN_DLL, BIN_FILES, BAT_FILES
+    
+    log_message("🔍 Поиск файлов...")
+    
+    goodbye_dir = os.path.join(BASE_DIR, "goodbyeDPI")
+    if os.path.exists(goodbye_dir):
+        GOODBYE_EXE = find_file(goodbye_dir, "goodbyedpi.exe") or GOODBYE_EXE
+        WINDIVERT_DLL = find_file(goodbye_dir, "WinDivert.dll") or WINDIVERT_DLL
+        WINDIVERT_SYS = find_file(goodbye_dir, "WinDivert64.sys") or WINDIVERT_SYS
+        BLACKLIST_FILE = find_file(goodbye_dir, "russia-blacklist.txt") or BLACKLIST_FILE
+    
+    zapret_dir = os.path.join(BASE_DIR, "zapret")
+    if os.path.exists(zapret_dir):
+        ZAPRET_EXE = find_file(zapret_dir, "winws.exe") or ZAPRET_EXE
+        CYGWIN_DLL = find_file(zapret_dir, "cygwin1.dll") or CYGWIN_DLL
+    
+    BIN_FILES = find_files(zapret_dir, '.bin') if os.path.exists(zapret_dir) else []
+    
+    # Ищем .bat файлы ВСЕГДА, не только в конкретных папках
+    BAT_FILES = []
+    for root, dirs, files in os.walk(BASE_DIR):
+        for f in files:
+            if f.endswith('.bat') or f.endswith('.cmd'):
+                BAT_FILES.append(os.path.join(root, f))
+    
+    update_paths()
+    update_config_list()  # <- Обновляем список конфигураций
+    
+    if GOODBYE_EXE:
+        log_message(f"✅ GoodbyeDPI найден")
+    if ZAPRET_EXE:
+        log_message(f"✅ Zapret найден")
+    if BAT_FILES:
+        log_message(f"✅ Найдено .bat файлов: {len(BAT_FILES)}")
+
+def load_config():
+    global current_engine, current_arch, DNS_SERVER, SELECTED_CONFIG
+    global GOODBYE_EXE, WINDIVERT_DLL, WINDIVERT_SYS, BLACKLIST_FILE
+    global ZAPRET_EXE, CYGWIN_DLL
+    
+    try:
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+                current_engine = config.get("engine", "GoodbyeDPI")
+                current_arch = config.get("arch", "64")
+                DNS_SERVER = config.get("dns", "8.8.8.8")
+                SELECTED_CONFIG = config.get("config", "Стандартная")  # <- ВОТ ЭТО
+                GOODBYE_EXE = config.get("goodbye_exe", "")
+                WINDIVERT_DLL = config.get("windivert_dll", "")
+                WINDIVERT_SYS = config.get("windivert_sys", "")
+                BLACKLIST_FILE = config.get("blacklist_file", "")
+                ZAPRET_EXE = config.get("zapret_exe", "")
+                CYGWIN_DLL = config.get("cygwin_dll", "")
+                return True
+    except:
+        pass
+    return False
+
+def save_config():
+    try:
+        config = {
+            "engine": current_engine,
+            "arch": current_arch,
+            "dns": DNS_SERVER,
+            "config": SELECTED_CONFIG,  # <- ВОТ ЭТО
+            "goodbye_exe": GOODBYE_EXE,
+            "windivert_dll": WINDIVERT_DLL,
+            "windivert_sys": WINDIVERT_SYS,
+            "blacklist_file": BLACKLIST_FILE,
+            "zapret_exe": ZAPRET_EXE,
+            "cygwin_dll": CYGWIN_DLL
+        }
+        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(config, f, indent=4, ensure_ascii=False)
+        log_message("💾 Настройки сохранены")
+        return True
+    except:
+        return False
+
+def update_paths():
+    goodbye_exe_var.set(os.path.basename(GOODBYE_EXE) if GOODBYE_EXE else "❌ не найден")
+    windivert_dll_var.set(os.path.basename(WINDIVERT_DLL) if WINDIVERT_DLL else "❌ не найден")
+    windivert_sys_var.set(os.path.basename(WINDIVERT_SYS) if WINDIVERT_SYS else "❌ не найден")
+    blacklist_var.set(os.path.basename(BLACKLIST_FILE) if BLACKLIST_FILE else "❌ не найден")
+    zapret_exe_var.set(os.path.basename(ZAPRET_EXE) if ZAPRET_EXE else "❌ не найден")
+    cygwin_dll_var.set(os.path.basename(CYGWIN_DLL) if CYGWIN_DLL else "❌ не найден")
+
+def update_config_list():
+    """Обновляет список доступных конфигураций в зависимости от движка"""
+    configs = ["Стандартная"]
+    
+    if current_engine == "GoodbyeDPI":
+        for f in BAT_FILES:
+            name = os.path.basename(f).lower()
+            if "goodbye" in name or "russia" in name or "dpi" in name:
+                configs.append(os.path.basename(f))
+    else:  # Zapret
+        for f in BAT_FILES:
+            name = os.path.basename(f).lower()
+            if "zapret" in name or "alt" in name or "general" in name or "winws" in name:
+                configs.append(os.path.basename(f))
+    
+    config_menu['values'] = configs
+    
+    # Если выбранная конфигурация есть в списке - оставляем
+    if SELECTED_CONFIG in configs:
+        config_var.set(SELECTED_CONFIG)
+    else:
+        config_var.set("Стандартная")
+
+def select_file(var, title, filetypes):
+    f = filedialog.askopenfilename(title=title, filetypes=filetypes, initialdir=BASE_DIR)
+    if f:
+        var.set(os.path.basename(f))
+        return f
+    return None
+
+def select_goodbye_exe():
+    global GOODBYE_EXE
+    f = select_file(goodbye_exe_var, "Выберите goodbyedpi.exe", [("EXE", "*.exe")])
+    if f:
+        GOODBYE_EXE = f
+        save_config()
+
+def select_windivert_dll():
+    global WINDIVERT_DLL
+    f = select_file(windivert_dll_var, "Выберите WinDivert.dll", [("DLL", "*.dll")])
+    if f:
+        WINDIVERT_DLL = f
+        save_config()
+
+def select_zapret_exe():
+    global ZAPRET_EXE
+    f = select_file(zapret_exe_var, "Выберите winws.exe", [("EXE", "*.exe")])
+    if f:
+        ZAPRET_EXE = f
+        save_config()
+
+def select_cygwin_dll():
+    global CYGWIN_DLL
+    f = select_file(cygwin_dll_var, "Выберите cygwin1.dll", [("DLL", "*.dll")])
+    if f:
+        CYGWIN_DLL = f
+        save_config()
+
+# =============================================
+# ЗАПУСК И ОСТАНОВКА
+# =============================================
+def run_zapret():
+    try:
+        log_message("🚀 Запуск Zapret...")
+        
+        if not ZAPRET_EXE or not os.path.exists(ZAPRET_EXE):
+            log_message("❌ winws.exe не найден!")
+            return
+        
+        # === ПРОВЕРЯЕМ .BAT КОНФИГУРАЦИЮ ===
+        if SELECTED_CONFIG and SELECTED_CONFIG != "Стандартная":
+            bat_path = None
+            for f in BAT_FILES:
+                if os.path.basename(f) == SELECTED_CONFIG:
+                    bat_path = f
+                    break
+            
+            if bat_path and os.path.exists(bat_path):
+                log_message(f"📁 Использую .bat: {os.path.basename(bat_path)}")
+                bat_dir = os.path.dirname(bat_path)
+                
+                subprocess.Popen(
+                    os.path.basename(bat_path),
+                    shell=True,
+                    cwd=bat_dir,
+                    creationflags=0
+                )
+                
+                time.sleep(2)
+                
+                if is_process_running("winws.exe"):
+                    log_message("✅ Zapret запущен через .bat!")
+                    return
+                else:
+                    log_message("⚠️ .bat не сработал, пробуем прямой запуск")
+        
+        # === ПРЯМОЙ ЗАПУСК ===
+        zapret_dir = os.path.dirname(ZAPRET_EXE)
+        os.chdir(zapret_dir)
+        
+        if CYGWIN_DLL and os.path.exists(CYGWIN_DLL):
+            shutil.copy2(CYGWIN_DLL, os.path.join(zapret_dir, "cygwin1.dll"))
+        
+        bin_files = find_files(zapret_dir, '.bin')
+        tls = ""
+        if bin_files:
+            for f in bin_files:
+                if "google" in f.lower() or "tls" in f.lower():
+                    tls = f'--dpi-desync-fake-tls="{os.path.basename(f)}"'
+                    break
+            if not tls:
+                tls = f'--dpi-desync-fake-tls="{os.path.basename(bin_files[0])}"'
+        
+        cmd = f'"{os.path.basename(ZAPRET_EXE)}" --wf-tcp=80,443 --wf-udp=443,443 --filter-udp=443 --dpi-desync=fake --dpi-desync-ttl=8 {tls} --dns-addr={DNS_SERVER}'
+        
+        log_message(f"📝 {cmd}")
+        
+        subprocess.Popen(cmd, shell=True, cwd=zapret_dir, creationflags=0)
+        time.sleep(2)
+        
+    except Exception as e:
+        log_message(f"❌ Ошибка: {e}")
+
+def run_goodbyedpi():
+    try:
+        log_message("🚀 Запуск GoodbyeDPI...")
+        
+        if not GOODBYE_EXE or not os.path.exists(GOODBYE_EXE):
+            log_message("❌ goodbyedpi.exe не найден!")
+            return
+        
+        # === ПРОВЕРЯЕМ .BAT КОНФИГУРАЦИЮ ===
+        if SELECTED_CONFIG and SELECTED_CONFIG != "Стандартная":
+            bat_path = None
+            for f in BAT_FILES:
+                if os.path.basename(f) == SELECTED_CONFIG:
+                    bat_path = f
+                    break
+            
+            if bat_path and os.path.exists(bat_path):
+                log_message(f"📁 Использую .bat: {os.path.basename(bat_path)}")
+                bat_dir = os.path.dirname(bat_path)
+                
+                subprocess.Popen(
+                    os.path.basename(bat_path),
+                    shell=True,
+                    cwd=bat_dir,
+                    creationflags=0
+                )
+                
+                time.sleep(2)
+                
+                if is_process_running("goodbyedpi.exe"):
+                    log_message("✅ GoodbyeDPI запущен через .bat!")
+                    return
+                else:
+                    log_message("⚠️ .bat не сработал, пробуем прямой запуск")
+        
+        # === ПРЯМОЙ ЗАПУСК ===
+        goodbye_dir = os.path.dirname(GOODBYE_EXE)
+        os.chdir(goodbye_dir)
+        
+        blacklist = BLACKLIST_FILE if os.path.exists(BLACKLIST_FILE) else ""
+        if blacklist:
+            blacklist = f"--blacklist {blacklist}"
+        
+        cmd = f'"{os.path.basename(GOODBYE_EXE)}" -1 {blacklist} --dns-addr {DNS_SERVER}'
+        
+        log_message(f"📝 {cmd}")
+        
+        subprocess.Popen(cmd, shell=True, cwd=goodbye_dir, creationflags=0)
+        time.sleep(2)
+        
+    except Exception as e:
+        log_message(f"❌ Ошибка: {e}")
+
+def start_hero():
+    if is_process_running("winws.exe") or is_process_running("goodbyedpi.exe"):
+        messagebox.showwarning("Внимание", "Герой уже работает!")
+        return
+    
+    if current_engine == "GoodbyeDPI":
+        run_goodbyedpi()
+    else:
+        run_zapret()
+
+def stop_hero():
+    try:
+        log_message("🛑 Остановка...")
+        subprocess.run("taskkill /f /im goodbyedpi.exe", shell=True, capture_output=True)
+        subprocess.run("taskkill /f /im winws.exe", shell=True, capture_output=True)
+        log_message("✅ Остановлен")
+    except Exception as e:
+        log_message(f"❌ Ошибка: {e}")
+
+def toggle_arch():
+    global current_arch
+    current_arch = "32" if current_arch == "64" else "64"
+    arch_btn.config(text=f"{current_arch}-bit")
+    save_config()
+
+def update_engine(*args):
+    global current_engine
+    current_engine = engine_var.get()
+    update_config_list()  # <- Обновляем список конфигураций при смене движка
+    save_config()
+
+def update_config(*args):
+    global SELECTED_CONFIG
+    SELECTED_CONFIG = config_var.get()
+    log_message(f"📋 Выбрана конфигурация: {SELECTED_CONFIG}")
+    save_config()
+
+def update_dns(*args):
+    global DNS_SERVER
+    for name, ip in DNS_OPTIONS.items():
+        if name in dns_var.get():
+            DNS_SERVER = ip
+            break
+    save_config()
+
+def manual_save():
+    save_config()
+    messagebox.showinfo("Успех", "Настройки сохранены!")
+
+def refresh_status():
+    running = is_process_running("winws.exe") or is_process_running("goodbyedpi.exe")
+    update_ui_status(running)
+    log_message("🔄 Статус обновлен")
+
+# =============================================
+# ИНТЕРФЕЙС
+# =============================================
+root = tk.Tk()
+root.title(f"{APP_NAME} v{APP_VERSION}")
+root.geometry("750x700")
+root.minsize(700, 650)
+root.configure(bg="#f5f7fa")
+
+# Заголовок
+header = tk.Frame(root, bg="#1a237e", height=60)
+header.pack(fill=tk.X)
+
+tk.Label(header, text="🦸 ГЕРОЙ", font=("Segoe UI", 22, "bold"), 
+         fg="white", bg="#1a237e").pack(side=tk.LEFT, padx=20)
+
+tk.Label(header, text=f"v{APP_VERSION}", font=("Segoe UI", 10), 
+         fg="#90caf9", bg="#1a237e").pack(side=tk.LEFT)
+
+# Статус
+status_frame = tk.Frame(root, bg="white", relief=tk.FLAT)
+status_frame.pack(fill=tk.X, padx=10, pady=5)
+
+tk.Label(status_frame, text="📊 Статус:", font=("Segoe UI", 10, "bold"), 
+         bg="white").pack(side=tk.LEFT, padx=10, pady=5)
+
+status_label = tk.Label(status_frame, text="🦸 ОЖИДАЕТ", 
+                        font=("Segoe UI", 10, "bold"), fg="gray", bg="white")
+status_label.pack(side=tk.LEFT, padx=5)
+
+tk.Button(status_frame, text="🔄", command=refresh_status,
+          font=("Segoe UI", 10), bg="#e3f2fd", relief=tk.FLAT, width=3).pack(side=tk.LEFT, padx=5)
+
+# Файлы
+files_frame = tk.Frame(root, bg="white", relief=tk.FLAT)
+files_frame.pack(fill=tk.X, padx=10, pady=5)
+
+tk.Label(files_frame, text="📁 Файлы:", font=("Segoe UI", 10, "bold"), 
+         bg="white").pack(anchor=tk.W, padx=10, pady=3)
+
+goodbye_exe_var = tk.StringVar()
+windivert_dll_var = tk.StringVar()
+windivert_sys_var = tk.StringVar()
+blacklist_var = tk.StringVar()
+zapret_exe_var = tk.StringVar()
+cygwin_dll_var = tk.StringVar()
+
+def add_row(parent, label, var, cmd):
+    row = tk.Frame(parent, bg="white")
+    row.pack(fill=tk.X, padx=10, pady=1)
+    tk.Label(row, text=label, font=("Segoe UI", 8), bg="white", width=12, anchor=tk.W).pack(side=tk.LEFT)
+    tk.Entry(row, textvariable=var, font=("Segoe UI", 8), state="readonly", 
+             bg="#f5f5f5", relief=tk.FLAT, width=35).pack(side=tk.LEFT, padx=2)
+    tk.Button(row, text="📂", command=cmd, font=("Segoe UI", 8), 
+              bg="#e3f2fd", relief=tk.FLAT, width=3).pack(side=tk.LEFT)
+
+add_row(files_frame, "goodbyedpi.exe:", goodbye_exe_var, select_goodbye_exe)
+add_row(files_frame, "WinDivert.dll:", windivert_dll_var, select_windivert_dll)
+add_row(files_frame, "winws.exe:", zapret_exe_var, select_zapret_exe)
+add_row(files_frame, "cygwin1.dll:", cygwin_dll_var, select_cygwin_dll)
+
+# Управление
+control_frame = tk.Frame(root, bg="white", relief=tk.FLAT)
+control_frame.pack(fill=tk.X, padx=10, pady=5)
+
+tk.Label(control_frame, text="⚙️ Управление:", font=("Segoe UI", 10, "bold"), 
+         bg="white").pack(anchor=tk.W, padx=10, pady=3)
+
+controls = tk.Frame(control_frame, bg="white")
+controls.pack(fill=tk.X, padx=10, pady=5)
+
+# Движок
+tk.Label(controls, text="Движок:", font=("Segoe UI", 9), bg="white").pack(side=tk.LEFT)
+
+engine_var = tk.StringVar(value=current_engine)
+engine_menu = ttk.Combobox(controls, textvariable=engine_var, 
+                           values=["GoodbyeDPI", "Zapret"], 
+                           state="readonly", width=12)
+engine_menu.pack(side=tk.LEFT, padx=5)
+engine_menu.bind('<<ComboboxSelected>>', update_engine)
+
+# DNS
+tk.Label(controls, text="DNS:", font=("Segoe UI", 9), bg="white").pack(side=tk.LEFT, padx=10)
+
+dns_options = [f"{name} ({ip})" for name, ip in DNS_OPTIONS.items()]
+dns_var = tk.StringVar(value="Google (8.8.8.8)")
+dns_menu = ttk.Combobox(controls, textvariable=dns_var, 
+                         values=dns_options, state="readonly", width=15)
+dns_menu.pack(side=tk.LEFT, padx=5)
+dns_menu.bind('<<ComboboxSelected>>', update_dns)
+
+# Архитектура
+arch_btn = tk.Button(controls, text="64-bit", command=toggle_arch,
+                     font=("Segoe UI", 8), bg="#4caf50", fg="white", relief=tk.FLAT, padx=10)
+arch_btn.pack(side=tk.LEFT, padx=10)
+
+# ===== ВОТ ЭТО БЫЛО ВЫРЕЗАНО - ВОЗВРАЩАЕМ! =====
+# Конфигурация (.bat файлы)
+config_frame = tk.Frame(control_frame, bg="white")
+config_frame.pack(fill=tk.X, padx=10, pady=5)
+
+tk.Label(config_frame, text="Конфигурация:", font=("Segoe UI", 9), bg="white").pack(side=tk.LEFT)
+
+config_var = tk.StringVar(value="Стандартная")
+config_menu = ttk.Combobox(config_frame, textvariable=config_var, 
+                            state="readonly", width=35)
+config_menu.pack(side=tk.LEFT, padx=5)
+config_menu.bind('<<ComboboxSelected>>', update_config)
+
+# Пояснение
+tk.Label(config_frame, text="(выберите .bat файл)", font=("Segoe UI", 7), 
+         fg="gray", bg="white").pack(side=tk.LEFT, padx=5)
+
+# Кнопки
+btn_frame = tk.Frame(root, bg="#f5f7fa")
+btn_frame.pack(fill=tk.X, padx=10, pady=10)
+
+start_btn = tk.Button(btn_frame, text="▶ ЗАПУСТИТЬ", command=start_hero,
+                      font=("Segoe UI", 11, "bold"), bg="#00c853", fg="white",
+                      relief=tk.FLAT, padx=20, pady=8, width=12)
+start_btn.pack(side=tk.LEFT, padx=5)
+
+stop_btn = tk.Button(btn_frame, text="⏹ ОСТАНОВИТЬ", command=stop_hero,
+                     font=("Segoe UI", 11, "bold"), bg="#ff1744", fg="white",
+                     relief=tk.FLAT, padx=20, pady=8, width=12, state=tk.DISABLED)
+stop_btn.pack(side=tk.LEFT, padx=5)
+
+save_btn = tk.Button(btn_frame, text="💾 СОХРАНИТЬ", command=manual_save,
+                     font=("Segoe UI", 10, "bold"), bg="#ff9800", fg="white",
+                     relief=tk.FLAT, padx=15, pady=8, width=12)
+save_btn.pack(side=tk.LEFT, padx=5)
+
+# Лог
+log_frame = tk.Frame(root, bg="white", relief=tk.FLAT)
+log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+log_header = tk.Frame(log_frame, bg="white")
+log_header.pack(fill=tk.X, padx=10, pady=3)
+
+tk.Label(log_header, text="📋 Лог:", font=("Segoe UI", 10, "bold"), 
+         bg="white").pack(side=tk.LEFT)
+
+tk.Button(log_header, text="Очистить", command=lambda: log_text.delete(1.0, tk.END),
+          font=("Segoe UI", 8), bg="#ffcdd2", relief=tk.FLAT, padx=10).pack(side=tk.RIGHT)
+
+log_text = tk.Text(log_frame, height=8, font=("Consolas", 9), 
+                   wrap=tk.WORD, bg="#fafafa", relief=tk.FLAT)
+log_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+scrollbar = ttk.Scrollbar(log_text, orient=tk.VERTICAL, command=log_text.yview)
+log_text.configure(yscrollcommand=scrollbar.set)
+scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+# Статус-бар
+status_bar = tk.Label(root, text="✅ Готов", relief=tk.SUNKEN, 
+                      anchor=tk.W, font=("Segoe UI", 8), bg="#e8e8e8")
+status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+
+# =============================================
+# ЗАПУСК
+# =============================================
+load_config()
+auto_scan()
+
+log_message(f"🦸 {APP_NAME} v{APP_VERSION} запущен")
+log_message(f"🔑 Админ: {'✅ Да' if is_admin() else '❌ Нет'}")
+
+# Запускаем монитор
+threading.Thread(target=monitor_loop, daemon=True).start()
+log_message("📊 Мониторинг запущен")
+
+# Проверяем запущенные процессы
+if is_process_running("winws.exe"):
+    log_message("🟢 Zapret уже запущен")
+    update_ui_status(True)
+if is_process_running("goodbyedpi.exe"):
+    log_message("🟢 GoodbyeDPI уже запущен")
+    update_ui_status(True)
+
+def on_close():
+    save_config()
+    root.destroy()
+
+root.protocol("WM_DELETE_WINDOW", on_close)
+root.mainloop()
